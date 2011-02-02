@@ -34,6 +34,8 @@
  *
  * ***** END LICENSE BLOCK ***** */
 
+"use strict";
+
 var EXPORTED_SYMBOLS = ['Message', 'MessageFromGloda', 'MessageFromDbHdr']
 
 const Ci = Components.interfaces;
@@ -309,7 +311,12 @@ Message.prototype = {
         ? [att.url, "resize-me"]
         : ["chrome://conversations/skin/icons/"+iconForMimeType(att.contentType), "icon"]
       ;
-      let formattedSize = gMessenger.formatFileSize(att.size);
+      let formattedSize = "?";
+      try {
+        formattedSize = gMessenger.formatFileSize(att.size);
+      } catch (e) {
+        Log.error(e);
+      }
       data.attachments.push({
         formattedSize: formattedSize,
         thumb: thumb,
@@ -386,46 +393,6 @@ Message.prototype = {
     Log.debug("This message's remote content was blocked");
 
     this._domNode.getElementsByClassName("remoteContent")[0].style.display = "block";
-  },
-
-  compose: function _Message_compose (aCompType, aEvent) {
-    let window = getMail3Pane();
-    if (aEvent.shiftKey) {
-      window.ComposeMessage(aCompType, Ci.nsIMsgCompFormat.OppositeOfDefault, this._msgHdr.folder, [this._uri]);
-    } else {
-      window.ComposeMessage(aCompType, Ci.nsIMsgCompFormat.Default, this._msgHdr.folder, [this._uri]);
-    }
-  },
-
-  forward: function _Message_forward (event) {
-    let forwardType = 0;
-    try {
-      forwardType = Prefs.getInt("mail.forward_message_mode");
-    } catch (e) {
-      Log.error("Unable to fetch preferred forward mode\n");
-    }
-    if (forwardType == 0)
-      this.compose(Ci.nsIMsgCompType.ForwardAsAttachment, event);
-    else
-      this.compose(Ci.nsIMsgCompType.ForwardInline, event);
-  },
-
-  register: function _Message_register (selector, f, options) {
-    let action;
-    if (typeof(options) == "undefined" || typeof(options.action) == "undefined")
-      action = "click";
-    else
-      action = options.action;
-    let nodes;
-    if (selector === null)
-      nodes = [this._domNode];
-    else if (typeof(selector) == "string")
-      nodes = this._domNode.querySelectorAll(selector);
-    else
-      nodes = [selector];
-
-    for each (let [, node] in Iterator(nodes))
-      node.addEventListener(action, f, false);
   },
 
   // Actually, we only do these expensive DOM calls when we need to, i.e. when
@@ -521,6 +488,10 @@ Message.prototype = {
       event.stopPropagation();
     });
 
+    this.register(".ignore-warning", function (event) {
+      self._domNode.getElementsByClassName("phishingBar")[0].style.display = "none";
+      self._msgHdr.setUint32Property("notAPhishMessage", 1);
+    });
     this.register(".show-remote-content", function (event) {
       self._domNode.getElementsByClassName("show-remote-content")[0].style.display = "none";
       self._msgHdr.setUint32Property("remoteContentPolicy", kAllowRemoteContent);
@@ -609,11 +580,10 @@ Message.prototype = {
       switch (event.keyCode) {
         case mainWindow.KeyEvent.DOM_VK_RETURN:
           if (isAccel(event)) {
-            if (event.shiftKey) {
-              self._conversation._htmlPane.contentWindow.onSend(null, { archive: true });
-            } else {
-              self._conversation._htmlPane.contentWindow.onSend();
-            }
+            if (event.shiftKey)
+              window.gComposeSession.send({ archive: true });
+            else
+              window.gComposeSession.send();
           }
           break;
 
@@ -623,7 +593,7 @@ Message.prototype = {
           break;
 
         default:
-          window.gComposeParams.startedEditing = true;
+          window.startedEditing(true);
       }
       event.stopPropagation();
     }, { action: "keypress" });
@@ -810,10 +780,13 @@ Message.prototype = {
           try {
             iframe.removeEventListener("load", f_temp1, true);
 
-            // XXX cut this off and turn into a this._onMessageStreamed
             let iframeDoc = iframe.contentDocument;
             self.tweakFonts(iframeDoc);
             self.detectQuotes(iframe);
+            if (self.checkForFishing(iframeDoc) && !self._msgHdr.getUint32Property("notAPhishMessage")) {
+              Log.debug("Phishing attempt");
+              self._domNode.getElementsByClassName("phishingBar")[0].style.display = "block";
+            }
 
             // Notify hooks that we just finished displaying a message. Must be
             //  performed now, not later.
@@ -989,6 +962,8 @@ Message.prototype = {
   }
 }
 
+MixIn(Message, EventHelperMixIn);
+
 function MessageFromGloda(aConversation, aGlodaMsg) {
   this._msgHdr = aGlodaMsg.folderMessage;
   this._glodaMsg = aGlodaMsg;
@@ -1079,7 +1054,7 @@ let PostStreamingFixesMixIn = {
   defaultSize: Prefs.getInt("font.size.variable.x-western"),
 
   tweakFonts: function (iframeDoc) {
-    let textSize = this.defaultSize * 12 / 16;
+    let textSize = Math.round(this.defaultSize * 12 / 16);
 
     // Assuming 16px is the default (like on, say, Linux), this gives
     //  18px and 12px, which what Andy had in mind.
@@ -1106,9 +1081,20 @@ let PostStreamingFixesMixIn = {
         "  font-family: \""+Prefs.getChar("font.default")+"\" !important;",
         "  font-size: "+textSize+"px !important;",
 //        "  line-height: 112.5% !important;",
-        "}"
+        "}",
       ]);
     }
+
+    // Do some reformatting + deal with people who have bad taste. All these
+    // rules are important: some people just send messages with horrible colors,
+    // which ruins the conversation view. Gecko tends to automatically add
+    // padding/margin to html mails.
+    styleRules = styleRules.concat([
+      "body {",
+      "  margin: 0; padding: 0;",
+      "  color: rgb(10, 10, 10); background-color: white;",
+      "}",
+    ]);
 
     // Ugly hack (once again) to get the style inside the
     // <iframe>. I don't think we can use a chrome:// url for
@@ -1120,15 +1106,10 @@ let PostStreamingFixesMixIn = {
       head.insertBefore(style, head.firstChild);
     else
       head.appendChild(style);
-
-    // Do some reformatting + deal with people who have bad taste
-    iframeDoc.body.setAttribute("style", "padding: 0; margin: 0; "+
-      "color: rgb(10, 10, 10); background-color: transparent; "+
-      "-moz-user-focus: none !important; ");
   },
 
   detectQuotes: function (iframe) {
-    let smallSize = this.defaultSize * 11 / 16;
+    let smallSize = Math.round(this.defaultSize * 11 / 16);
 
     // Launch various crappy pieces of code^W^W^W^W heuristics to
     //  convert most common quoting styles to real blockquotes. Spoiler:
@@ -1189,6 +1170,57 @@ let PostStreamingFixesMixIn = {
     // See link above for a rationale ^^
     if (self.initialPosition > 0)
       walk(iframeDoc);
+  },
+
+  /**
+   * The phishing detector that's in Thunderbird would need a lot of rework:
+   * it's not easily extensible, and the code has a lot of noise, i.e. it just
+   * performs simple operations but it's written in a convoluted way. We should
+   * just rewrite everything, but for now, we just rewrite+simplify the main
+   * function, and still rely on the badly-designed underlying functions for the
+   * low-level treatments.
+   */
+  checkForFishing: function (iframeDoc) {
+    let gPhishingDetector = getMail3Pane().gPhishingDetector;
+    let isPhishing = false;
+    let links = iframeDoc.getElementsByTagName("a");
+    for (let [, a] in Iterator(links)) {
+      let linkText = a.textContent;
+      let linkUrl = a.getAttribute("href");
+      let hrefURL;
+      // make sure relative link urls don't make us bail out
+      try {
+        hrefURL = ioService.newURI(linkUrl, null, null);
+      } catch(ex) {
+        continue;
+      }
+
+      // only check for phishing urls if the url is an http or https link.
+      // this prevents us from flagging imap and other internally handled urls
+      if (hrefURL.schemeIs('http') || hrefURL.schemeIs('https')) {
+        // The link is not suspicious if the visible text is the same as the URL,
+        // even if the URL is an IP address. URLs are commonly surrounded by
+        // < > or "" (RFC2396E) - so strip those from the link text before comparing.
+        if (linkText)
+          linkText = linkText.replace(/^<(.+)>$|^"(.+)"$/, "$1$2");
+
+        let failsStaticTests = false;
+        if (linkText != linkUrl) {
+          // Yes, the third parameter to misMatchedHostWithLinkText is actually
+          //  required, but it's some kind of an out value that's useless for
+          //  us, so just pass it {} so that it's happy...
+          failsStaticTests =
+            gPhishingDetector.hostNameIsIPAddress(hrefURL.host) && !gPhishingDetector.isLocalIPAddress(unobscuredHostNameValue)
+            || linkText && gPhishingDetector.misMatchedHostWithLinkText(hrefURL, linkText, {});
+        }
+
+        if (failsStaticTests) {
+          isPhishing = true;
+          break;
+        }
+      }
+    }
+    return isPhishing;
   },
 };
 
