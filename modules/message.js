@@ -1105,7 +1105,7 @@ let PostStreamingFixesMixIn = {
         ".moz-text-flowed, .moz-text-plain {",
         "  font-family: \""+Prefs.getChar("font.default")+"\" !important;",
         "  font-size: "+textSize+"px !important;",
-        "  line-height: 112.5% !important;",
+//        "  line-height: 112.5% !important;",
         "}"
       ]);
     }
