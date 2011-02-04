@@ -70,6 +70,7 @@ let strings = new StringBundle("chrome://conversations/locale/main.properties");
 Cu.import("resource://conversations/stdlib/addressBookUtils.js");
 Cu.import("resource://conversations/stdlib/msgHdrUtils.js");
 Cu.import("resource://conversations/stdlib/misc.js");
+Cu.import("resource://conversations/plugins/helpers.js");
 Cu.import("resource://conversations/quoting.js");
 Cu.import("resource://conversations/contact.js");
 Cu.import("resource://conversations/prefs.js");
@@ -1011,9 +1012,10 @@ function MessageFromDbHdr(aConversation, aMsgHdr) {
 
       let [text, meta] = mimeMsgToContentSnippetAndMeta(aMimeMsg, aMsgHdr.folder, snippetLength);
       self._snippet = text;
-      if ("x-bugzilla-who" in aMimeMsg.headers) {
+      let alternativeSender = PluginHelpers.alternativeSender({ mime: aMimeMsg, header: aMsgHdr });
+      if (alternativeSender) {
         self._realFrom = self._from;
-        self._from = self.parse(aMimeMsg.headers["x-bugzilla-who"])[0];
+        self._from = self.parse(alternativeSender);
       }
 
       self._attachments = aMimeMsg.allUserAttachments
